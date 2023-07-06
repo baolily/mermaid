@@ -162,7 +162,12 @@ class ModelFactory(object):
                                                  self.spacing_model, cparams)
             else:
                 print("works in mermaid iter mode")
-                loss = self.models[modelName][1](list(model.parameters())[0], self.sz_sim, self.spacing_sim, self.sz_model, self.spacing_model, cparams)
+                ms = list(model.parameters())
+                if len(ms) > 1: # multiK case
+                    loss = self.models[modelName][1](ms, self.sz_sim, self.spacing_sim, self.sz_model, self.spacing_model, cparams)
+                else:
+                    loss = self.models[modelName][1](ms[0], self.sz_sim, self.spacing_sim, self.sz_model, self.spacing_model, cparams)
+                # list(model.parameters())[0].size() = torch.Size([1, 2, 16, 16]) # This is perhaps wrong
             return model, loss
         else:
             self.print_available_models()

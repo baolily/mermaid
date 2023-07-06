@@ -317,7 +317,7 @@ class GaussianSpatialSmoother(GaussianSmoother):
 
     def __init__(self, sz, spacing, params):
         super(GaussianSpatialSmoother,self).__init__(sz,spacing,params)
-        self.k_sz_h = params[('k_sz_h', 5*np.ones(self.dim, dtype='int'), 'size of the kernel' )]
+        self.k_sz_h = params[('k_sz_h', 9*np.ones(self.dim, dtype='int'), 'size of the kernel' )]
         """size of half the smoothing kernel"""
         self.filter = None
         """smoothing filter"""
@@ -425,6 +425,450 @@ class GaussianSpatialSmoother(GaussianSmoother):
         return smoothed_v
 
 
+class WendlandSpatialSmoother(GaussianSmoother):
+
+    def __init__(self, sz, spacing, params):
+        super(WendlandSpatialSmoother,self).__init__(sz,spacing,params)
+        self.k_sz_h = params[('k_sz_h', 9*np.ones(self.dim, dtype='int'), 'size of the kernel' )]
+        """size of half the smoothing kernel"""
+        self.filter = None
+        """smoothing filter"""
+
+    def set_k_sz_h(self,k_sz_h):
+        """
+        Set the size of half the smoothing kernel
+
+        :param k_sz_h: size of half the kernel as array
+        """
+        self.k_sz_h = k_sz_h
+        self.params['k_sz_h'] = self.k_sz_h
+
+    def get_k_sz_h(self):
+        """
+        Returns the size of half the smoothing kernel
+
+        :return: return half the smoothing kernel size
+        """
+        return self.k_sz_h
+
+    def _create_filter(self):
+
+        if self.k_sz_h is None:
+            self.k_sz = (2 * 5 + 1) * np.ones(self.dim, dtype='int')  # default kernel size
+        else:
+            self.k_sz = self.k_sz_h * 2 + 1  # this is to assure that the kernel is odd size
+
+        self.smoothingKernel = self._create_smoothing_kernel(self.k_sz)
+        self.required_padding = (self.k_sz-1)//2
+
+        if self.dim==1:
+            self.filter =AdaptVal(torch.from_numpy(self.smoothingKernel))
+        elif self.dim==2:
+            self.filter = AdaptVal(torch.from_numpy(self.smoothingKernel))
+        elif self.dim==3:
+            self.filter = AdaptVal(torch.from_numpy(self.smoothingKernel))
+        else:
+            raise ValueError('Can only create the smoothing kernel in dimensions 1-3')
+
+    def _create_smoothing_kernel(self, k_sz):
+        mus = np.zeros(self.dim)
+        stds = 1.5 * np.ones(self.dim)
+        centered_id = utils.centered_identity_map(k_sz,self.spacing)
+        g = utils.compute_normalized_wendland(centered_id, mus, stds)
+
+        return g
+
+    def _filter_input_with_padding(self, I, Iout=None):
+
+        if self.dim==1:
+            I_4d = I.view([1]+list(I.size()))
+            I_pad = F.pad(I_4d,(self.required_padding[0],self.required_padding[0],0,0),mode='replicate').view(1,1,-1)
+            # 1D will be available in pytorch 0.4
+            # I_pad = F.pad(I, (self.required_padding[0], self.required_padding[0]), mode='replicate')
+            I_sz = I_pad.size()
+            sm_filter = self.filter.repeat(I_sz[1], 1, 1)  # output_ch input_chh h, w
+            if Iout is not None:
+                Iout = F.conv1d(I_pad,sm_filter, groups=I_sz[1])
+                return Iout
+            else:
+                return F.conv1d(I_pad,sm_filter, groups=I_sz[1])
+        elif self.dim==2:
+            I_pad = F.pad(I,(self.required_padding[0],self.required_padding[0],
+                                self.required_padding[1],self.required_padding[1]),mode='replicate')
+            I_sz = I_pad.size()
+            sm_filter = self.filter.repeat(I_sz[1], 1, 1, 1)  # output_ch input_chh h, w
+            if Iout is not None:
+                Iout = F.conv2d(I_pad,sm_filter, groups=I_sz[1])
+                return Iout
+            else:
+                return F.conv2d(I_pad,sm_filter, groups=I_sz[1])
+        elif self.dim==3:
+            I_pad = F.pad(I, (self.required_padding[0], self.required_padding[0],
+                                 self.required_padding[1], self.required_padding[1],
+                                 self.required_padding[2], self.required_padding[2]), mode='replicate')
+            I_sz = I_pad.size()
+            sm_filter = self.filter.repeat(I_sz[1], 1, 1, 1, 1)  # output_ch input_chh h, w
+            if Iout is not None:
+                Iout = F.conv3d(I_pad, sm_filter, groups=I_sz[1])
+            else:
+                return F.conv3d(I_pad, sm_filter, groups=I_sz[1])
+        else:
+            raise ValueError('Can only perform padding in dimensions 1-3')
+
+    def apply_smooth(self, v, vout=None, pars=dict(), variables_from_optimizer=None, smooth_to_compute_regularizer_energy=False, clampCFL_dt=None):
+        """
+        Smooth the scalar field using Gaussian smoothing in the spatial domain
+
+        :param v: image to smooth
+        :param vout: if not None returns the result in this variable
+        :param pars: dictionary that can contain various extra variables; for smoother this will for example be
+            the current image 'I' or the current map 'phi'. typically not used.
+        :param variables_from_optimizer: variables that can be passed from the optimizer (for example iteration count)
+        :return: smoothed image
+        """
+
+        if self.filter is None:
+            self._create_filter()
+        # just doing a Gaussian smoothing
+
+        smoothed_v = self._filter_input_with_padding(v, vout)
+        smoothed_v = self._do_CFL_clamping_if_necessary(smoothed_v,clampCFL_dt=clampCFL_dt)
+
+        return smoothed_v
+
+
+class WendlandSpatialSmootherX(GaussianSmoother):
+
+    def __init__(self, sz, spacing, params):
+        super(WendlandSpatialSmootherX,self).__init__(sz,spacing,params)
+        self.k_sz_h = params[('k_sz_h', 9*np.ones(self.dim, dtype='int'), 'size of the kernel' )]
+        """size of half the smoothing kernel"""
+        self.filter = None
+        """smoothing filter"""
+
+    def set_k_sz_h(self,k_sz_h):
+        """
+        Set the size of half the smoothing kernel
+
+        :param k_sz_h: size of half the kernel as array
+        """
+        self.k_sz_h = k_sz_h
+        self.params['k_sz_h'] = self.k_sz_h
+
+    def get_k_sz_h(self):
+        """
+        Returns the size of half the smoothing kernel
+
+        :return: return half the smoothing kernel size
+        """
+        return self.k_sz_h
+
+    def _create_filter(self):
+
+        if self.k_sz_h is None:
+            self.k_sz = (2 * 5 + 1) * np.ones(self.dim, dtype='int')  # default kernel size
+        else:
+            self.k_sz = self.k_sz_h * 2 + 1  # this is to assure that the kernel is odd size
+
+        self.smoothingKernel = self._create_smoothing_kernel(self.k_sz)
+        self.required_padding = (self.k_sz-1)//2
+
+        if self.dim==1:
+            self.filter =AdaptVal(torch.from_numpy(self.smoothingKernel))
+        elif self.dim==2:
+            self.filter = AdaptVal(torch.from_numpy(self.smoothingKernel))
+        elif self.dim==3:
+            self.filter = AdaptVal(torch.from_numpy(self.smoothingKernel))
+        else:
+            raise ValueError('Can only create the smoothing kernel in dimensions 1-3')
+
+    def _create_smoothing_kernel(self, k_sz):
+        mus = np.zeros(self.dim)
+        stds = 1.5* np.ones(self.dim)
+        centered_id = utils.centered_identity_map_change_middleX(k_sz,self.spacing)
+        g = utils.compute_normalized_wendlandX(centered_id, mus, stds)
+        # g = np.gradient(g, axis=0)
+        return g
+
+    def _filter_input_with_padding(self, I, Iout=None):
+
+        if self.dim==1:
+            I_4d = I.view([1]+list(I.size()))
+            I_pad = F.pad(I_4d,(self.required_padding[0],self.required_padding[0],0,0),mode='replicate').view(1,1,-1)
+            # 1D will be available in pytorch 0.4
+            # I_pad = F.pad(I, (self.required_padding[0], self.required_padding[0]), mode='replicate')
+            I_sz = I_pad.size()
+            sm_filter = self.filter.repeat(I_sz[1], 1, 1)  # output_ch input_chh h, w
+            if Iout is not None:
+                Iout = F.conv1d(I_pad,sm_filter, groups=I_sz[1])
+                return Iout
+            else:
+                return F.conv1d(I_pad,sm_filter, groups=I_sz[1])
+        elif self.dim==2:
+            I_pad = F.pad(I,(self.required_padding[0],self.required_padding[0],
+                                self.required_padding[1],self.required_padding[1]),mode='replicate')
+            I_sz = I_pad.size()
+            sm_filter = self.filter.repeat(I_sz[1], 1, 1, 1)  # output_ch input_chh h, w
+            if Iout is not None:
+                Iout = F.conv2d(I_pad,sm_filter, groups=I_sz[1])
+                return Iout
+            else:
+                return F.conv2d(I_pad,sm_filter, groups=I_sz[1])
+        elif self.dim==3:
+            I_pad = F.pad(I, (self.required_padding[0], self.required_padding[0],
+                                 self.required_padding[1], self.required_padding[1],
+                                 self.required_padding[2], self.required_padding[2]), mode='replicate')
+            I_sz = I_pad.size()
+            sm_filter = self.filter.repeat(I_sz[1], 1, 1, 1, 1)  # output_ch input_chh h, w
+            if Iout is not None:
+                Iout = F.conv3d(I_pad, sm_filter, groups=I_sz[1])
+            else:
+                return F.conv3d(I_pad, sm_filter, groups=I_sz[1])
+        else:
+            raise ValueError('Can only perform padding in dimensions 1-3')
+
+    def apply_smooth(self, v, vout=None, pars=dict(), variables_from_optimizer=None, smooth_to_compute_regularizer_energy=False, clampCFL_dt=None):
+        """
+        Smooth the scalar field using Gaussian smoothing in the spatial domain
+
+        :param v: image to smooth
+        :param vout: if not None returns the result in this variable
+        :param pars: dictionary that can contain various extra variables; for smoother this will for example be
+            the current image 'I' or the current map 'phi'. typically not used.
+        :param variables_from_optimizer: variables that can be passed from the optimizer (for example iteration count)
+        :return: smoothed image
+        """
+
+        if self.filter is None:
+            self._create_filter()
+        # just doing a Gaussian smoothing
+
+        smoothed_v = self._filter_input_with_padding(v, vout)
+        smoothed_v = self._do_CFL_clamping_if_necessary(smoothed_v,clampCFL_dt=clampCFL_dt)
+
+        return smoothed_v
+
+class WendlandSpatialSmootherY(GaussianSmoother):
+
+    def __init__(self, sz, spacing, params):
+        super(WendlandSpatialSmootherY,self).__init__(sz,spacing,params)
+        self.k_sz_h = params[('k_sz_h', 9*np.ones(self.dim, dtype='int'), 'size of the kernel' )]
+        """size of half the smoothing kernel"""
+        self.filter = None
+        """smoothing filter"""
+
+    def set_k_sz_h(self,k_sz_h):
+        """
+        Set the size of half the smoothing kernel
+
+        :param k_sz_h: size of half the kernel as array
+        """
+        self.k_sz_h = k_sz_h
+        self.params['k_sz_h'] = self.k_sz_h
+
+    def get_k_sz_h(self):
+        """
+        Returns the size of half the smoothing kernel
+
+        :return: return half the smoothing kernel size
+        """
+        return self.k_sz_h
+
+    def _create_filter(self):
+
+        if self.k_sz_h is None:
+            self.k_sz = (2 * 5 + 1) * np.ones(self.dim, dtype='int')  # default kernel size
+        else:
+            self.k_sz = self.k_sz_h * 2 + 1  # this is to assure that the kernel is odd size
+
+        self.smoothingKernel = self._create_smoothing_kernel(self.k_sz)
+        self.required_padding = (self.k_sz-1)//2
+
+        if self.dim==1:
+            self.filter =AdaptVal(torch.from_numpy(self.smoothingKernel))
+        elif self.dim==2:
+            self.filter = AdaptVal(torch.from_numpy(self.smoothingKernel))
+        elif self.dim==3:
+            self.filter = AdaptVal(torch.from_numpy(self.smoothingKernel))
+        else:
+            raise ValueError('Can only create the smoothing kernel in dimensions 1-3')
+
+    def _create_smoothing_kernel(self, k_sz):
+        mus = np.zeros(self.dim)
+        stds = 1.5 * np.ones(self.dim)
+        centered_id = utils.centered_identity_map_change_middleY(k_sz,self.spacing)
+        g = utils.compute_normalized_wendlandY(centered_id, mus, stds)
+        # g = np.gradient(g, axis=1)
+        return g
+
+    def _filter_input_with_padding(self, I, Iout=None):
+
+        if self.dim==1:
+            I_4d = I.view([1]+list(I.size()))
+            I_pad = F.pad(I_4d,(self.required_padding[0],self.required_padding[0],0,0),mode='replicate').view(1,1,-1)
+            # 1D will be available in pytorch 0.4
+            # I_pad = F.pad(I, (self.required_padding[0], self.required_padding[0]), mode='replicate')
+            I_sz = I_pad.size()
+            sm_filter = self.filter.repeat(I_sz[1], 1, 1)  # output_ch input_chh h, w
+            if Iout is not None:
+                Iout = F.conv1d(I_pad,sm_filter, groups=I_sz[1])
+                return Iout
+            else:
+                return F.conv1d(I_pad,sm_filter, groups=I_sz[1])
+        elif self.dim==2:
+            I_pad = F.pad(I,(self.required_padding[0],self.required_padding[0],
+                                self.required_padding[1],self.required_padding[1]),mode='replicate')
+            I_sz = I_pad.size()
+            sm_filter = self.filter.repeat(I_sz[1], 1, 1, 1)  # output_ch input_chh h, w
+            if Iout is not None:
+                Iout = F.conv2d(I_pad,sm_filter, groups=I_sz[1])
+                return Iout
+            else:
+                return F.conv2d(I_pad,sm_filter, groups=I_sz[1])
+        elif self.dim==3:
+            I_pad = F.pad(I, (self.required_padding[0], self.required_padding[0],
+                                 self.required_padding[1], self.required_padding[1],
+                                 self.required_padding[2], self.required_padding[2]), mode='replicate')
+            I_sz = I_pad.size()
+            sm_filter = self.filter.repeat(I_sz[1], 1, 1, 1, 1)  # output_ch input_chh h, w
+            if Iout is not None:
+                Iout = F.conv3d(I_pad, sm_filter, groups=I_sz[1])
+            else:
+                return F.conv3d(I_pad, sm_filter, groups=I_sz[1])
+        else:
+            raise ValueError('Can only perform padding in dimensions 1-3')
+
+    def apply_smooth(self, v, vout=None, pars=dict(), variables_from_optimizer=None, smooth_to_compute_regularizer_energy=False, clampCFL_dt=None):
+        """
+        Smooth the scalar field using Gaussian smoothing in the spatial domain
+
+        :param v: image to smooth
+        :param vout: if not None returns the result in this variable
+        :param pars: dictionary that can contain various extra variables; for smoother this will for example be
+            the current image 'I' or the current map 'phi'. typically not used.
+        :param variables_from_optimizer: variables that can be passed from the optimizer (for example iteration count)
+        :return: smoothed image
+        """
+
+        if self.filter is None:
+            self._create_filter()
+        # just doing a Gaussian smoothing
+
+        smoothed_v = self._filter_input_with_padding(v, vout)
+        smoothed_v = self._do_CFL_clamping_if_necessary(smoothed_v,clampCFL_dt=clampCFL_dt)
+
+        return smoothed_v
+
+class WendlandSpatialSmootherZ(GaussianSmoother):
+
+    def __init__(self, sz, spacing, params):
+        super(WendlandSpatialSmootherZ,self).__init__(sz,spacing,params)
+        self.k_sz_h = params[('k_sz_h', 7*np.ones(self.dim, dtype='int'), 'size of the kernel' )]
+        """size of half the smoothing kernel"""
+        self.filter = None
+        """smoothing filter"""
+
+    def set_k_sz_h(self,k_sz_h):
+        """
+        Set the size of half the smoothing kernel
+
+        :param k_sz_h: size of half the kernel as array
+        """
+        self.k_sz_h = k_sz_h
+        self.params['k_sz_h'] = self.k_sz_h
+
+    def get_k_sz_h(self):
+        """
+        Returns the size of half the smoothing kernel
+
+        :return: return half the smoothing kernel size
+        """
+        return self.k_sz_h
+
+    def _create_filter(self):
+
+        if self.k_sz_h is None:
+            self.k_sz = (2 * 5 + 1) * np.ones(self.dim, dtype='int')  # default kernel size
+        else:
+            self.k_sz = self.k_sz_h * 2 + 1  # this is to assure that the kernel is odd size
+
+        self.smoothingKernel = self._create_smoothing_kernel(self.k_sz)
+        self.required_padding = (self.k_sz-1)//2
+
+        if self.dim==1:
+            self.filter =AdaptVal(torch.from_numpy(self.smoothingKernel))
+        elif self.dim==2:
+            self.filter = AdaptVal(torch.from_numpy(self.smoothingKernel))
+        elif self.dim==3:
+            self.filter = AdaptVal(torch.from_numpy(self.smoothingKernel))
+        else:
+            raise ValueError('Can only create the smoothing kernel in dimensions 1-3')
+
+    def _create_smoothing_kernel(self, k_sz):
+        mus = np.zeros(self.dim)
+        stds = 1 * np.ones(self.dim)
+        centered_id = utils.centered_identity_map_change_middle(k_sz,self.spacing)
+        g = utils.compute_normalized_wendlandZ(centered_id, mus, stds)
+        # g = np.gradient(g, axis=0)
+        return g
+
+    def _filter_input_with_padding(self, I, Iout=None):
+
+        if self.dim==1:
+            I_4d = I.view([1]+list(I.size()))
+            I_pad = F.pad(I_4d,(self.required_padding[0],self.required_padding[0],0,0),mode='replicate').view(1,1,-1)
+            # 1D will be available in pytorch 0.4
+            # I_pad = F.pad(I, (self.required_padding[0], self.required_padding[0]), mode='replicate')
+            I_sz = I_pad.size()
+            sm_filter = self.filter.repeat(I_sz[1], 1, 1)  # output_ch input_chh h, w
+            if Iout is not None:
+                Iout = F.conv1d(I_pad,sm_filter, groups=I_sz[1])
+                return Iout
+            else:
+                return F.conv1d(I_pad,sm_filter, groups=I_sz[1])
+        elif self.dim==2:
+            I_pad = F.pad(I,(self.required_padding[0],self.required_padding[0],
+                                self.required_padding[1],self.required_padding[1]),mode='replicate')
+            I_sz = I_pad.size()
+            sm_filter = self.filter.repeat(I_sz[1], 1, 1, 1)  # output_ch input_chh h, w
+            if Iout is not None:
+                Iout = F.conv2d(I_pad,sm_filter, groups=I_sz[1])
+                return Iout
+            else:
+                return F.conv2d(I_pad,sm_filter, groups=I_sz[1])
+        elif self.dim==3:
+            I_pad = F.pad(I, (self.required_padding[0], self.required_padding[0],
+                                 self.required_padding[1], self.required_padding[1],
+                                 self.required_padding[2], self.required_padding[2]), mode='replicate')
+            I_sz = I_pad.size()
+            sm_filter = self.filter.repeat(I_sz[1], 1, 1, 1, 1)  # output_ch input_chh h, w
+            if Iout is not None:
+                Iout = F.conv3d(I_pad, sm_filter, groups=I_sz[1])
+            else:
+                return F.conv3d(I_pad, sm_filter, groups=I_sz[1])
+        else:
+            raise ValueError('Can only perform padding in dimensions 1-3')
+
+    def apply_smooth(self, v, vout=None, pars=dict(), variables_from_optimizer=None, smooth_to_compute_regularizer_energy=False, clampCFL_dt=None):
+        """
+        Smooth the scalar field using Gaussian smoothing in the spatial domain
+
+        :param v: image to smooth
+        :param vout: if not None returns the result in this variable
+        :param pars: dictionary that can contain various extra variables; for smoother this will for example be
+            the current image 'I' or the current map 'phi'. typically not used.
+        :param variables_from_optimizer: variables that can be passed from the optimizer (for example iteration count)
+        :return: smoothed image
+        """
+
+        if self.filter is None:
+            self._create_filter()
+        # just doing a Gaussian smoothing
+
+        smoothed_v = self._filter_input_with_padding(v, vout)
+        smoothed_v = self._do_CFL_clamping_if_necessary(smoothed_v,clampCFL_dt=clampCFL_dt)
+
+        return smoothed_v
 
 class GaussianFourierSmoother(with_metaclass(ABCMeta, GaussianSmoother)):
     """
@@ -623,7 +1067,8 @@ class MultiGaussianFourierSmoother(GaussianFourierSmoother):
 
     def __init__(self, sz, spacing, params):
         super(MultiGaussianFourierSmoother, self).__init__(sz, spacing, params)
-        self.multi_gaussian_stds = np.array( params[('multi_gaussian_stds', [0.05,0.1,0.15,0.2,0.25], 'std deviations for the Gaussians')] )
+        # self.multi_gaussian_stds = np.array( params[('multi_gaussian_stds', [0.05,0.1,0.15,0.2,0.25], 'std deviations for the Gaussians')] )
+        self.multi_gaussian_stds = np.array( params[('multi_gaussian_stds', [1.0], 'std deviations for the Gaussians')] )
         default_multi_gaussian_weights = self.multi_gaussian_stds.copy()
         default_multi_gaussian_weights /= default_multi_gaussian_weights.sum()
         """standard deviations of Gaussians"""
@@ -1646,7 +2091,11 @@ class AvailableSmoothers(object):
             'adaptive_multiGaussian': (AdaptiveMultiGaussianFourierSmoother, 'Adaptive multi Gaussian smoothing in the Fourier domain w/ optimization over weights and stds'),
             'learned_multiGaussianCombination': (LearnedMultiGaussianCombinationFourierSmoother, 'Experimental learned smoother'),
             'gaussianSpatial': (GaussianSpatialSmoother, 'Gaussian smoothing in the spatial domain'),
-            'localAdaptive':(LocalFourierSmoother,'Experimental local smoother')
+            'localAdaptive': (LocalFourierSmoother,'Experimental local smoother'),
+            'wendland': (WendlandSpatialSmoother, 'wendland'),
+            'wendland_x': (WendlandSpatialSmootherX, 'wendland_x'),
+            'wendland_y': (WendlandSpatialSmootherY, 'wendland_y'),
+            'wendland_z': (WendlandSpatialSmootherZ, 'wendland_z'),
         }
         """dictionary defining all the smoothers"""
 
@@ -1677,7 +2126,7 @@ class SmootherFactory(object):
         """size of image (X,Y,...); does not include batch-size or number of channels"""
         self.dim = len( spacing )
         """dimension of image"""
-        self.default_smoother_type = 'multiGaussian'
+        self.default_smoother_type = 'wendland'#'gaussianSpatial'
         """default smoother used for smoothing"""
         self.smoothers = AvailableSmoothers().get_smoothers()
 

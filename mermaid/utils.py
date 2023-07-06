@@ -118,16 +118,16 @@ def remove_infs_from_variable(v):
 
     if type(v.data) == torch.cuda.FloatTensor or v.data.dtype==torch.float32:
         return torch.clamp(v,
-                           min=(np.asscalar(np.finfo('float32').min))/reduction_factor,
-                           max=(np.asscalar(np.finfo('float32').max))/reduction_factor)
+                           min=(np.ndarray.item(np.asarray(np.finfo('float32').min)))/reduction_factor,
+                           max=(np.ndarray.item(np.asarray(np.finfo('float32').max)))/reduction_factor)
     elif v.data.dtype == torch.DoubleTensor or type(v.data) == torch.cuda.DoubleTensor:
         return torch.clamp(v,
-                           min=(np.asscalar(np.finfo('float64').min))/reduction_factor,
-                           max=(np.asscalar(np.finfo('float64').max))/reduction_factor)
+                           min=(np.ndarray.item(np.asarray(np.finfo('float64').min)))/reduction_factor,
+                           max=(np.ndarray.item(np.asarray(np.finfo('float64').max)))/reduction_factor)
     elif v.data.dtype == torch.HalfTensor or type(v.data) == torch.cuda.HalfTensor:
         return torch.clamp(v,
-                           min=(np.asscalar(np.finfo('float16').min))/reduction_factor,
-                           max=(np.asscalar(np.finfo('float16').max))/reduction_factor)
+                           min=(np.ndarray.item(np.asarray(np.finfo('float16').min)))/reduction_factor,
+                           max=(np.ndarray.item(np.asarray(np.finfo('float16').max)))/reduction_factor)
     else:
         raise ValueError('Unknown data type: ' + str( type(v.data)))
 
@@ -340,12 +340,12 @@ def compute_normalized_gaussian(X, mu, sig):
     dim = len(mu)
     if dim == 1:
         g = np.exp(-np.power(X[0, :] - mu[0], 2.)/(2*np.power(sig[0], 2.)))
-        g = g/g.sum()
+        g = g / g.sum()
         return g
     elif dim == 2:
-        g = np.exp(-np.power(X[0,:,:]-mu[0],2.)/(2*np.power(sig[0],2.))
-                   - np.power(X[1,:, :] - mu[1], 2.) / (2 * np.power(sig[1], 2.)))
-        g = g/g.sum()
+        g = np.exp(-np.power(X[0, :, :] - mu[0], 2.) / (2 * np.power(sig[0], 2.))
+                   -np.power(X[1, :, :] - mu[1], 2.) / (2 * np.power(sig[1], 2.)))
+        g = g / g.sum()
         return g
     elif dim == 3:
         g = np.exp(-np.power(X[0,:, :, :] - mu[0], 2.) / (2 * np.power(sig[0], 2.))
@@ -356,6 +356,103 @@ def compute_normalized_gaussian(X, mu, sig):
     else:
         raise ValueError('Can only compute Gaussians in dimensions 1-3')
 
+def compute_normalized_wendland(X, mu, sig):
+    dim = len(mu)
+    if dim == 1:
+        g = np.power(np.maximum(1 - np.abs(X[0,:] - mu[0]) / sig[0], 0), 2)
+        g = g / g.sum()
+        return g
+    elif dim == 2:
+        g = (np.power(np.maximum(1 - np.abs(X[0,:,:] - mu[0]) / sig[0], 0), 2) 
+            * np.power(np.maximum(1 - np.abs(X[1,:,:] - mu[1]) / sig[1], 0), 2))
+        g = g / g.sum()       
+        return g
+    elif dim == 3:
+        g = (np.power(np.maximum(1 - np.abs(X[0,:,:] - mu[0]) / sig[0], 0), 2) 
+            * np.power(np.maximum(1 - np.abs(X[1,:,:] - mu[1]) / sig[1], 0), 2)
+            * np.power(np.maximum(1 - np.abs(X[2,:,:] - mu[2]) / sig[2], 0), 2))
+        g = g / g.sum()       
+        return g
+    else:
+        raise ValueError('Can only compute Wendland in dimensions 1-2')
+
+def compute_normalized_wendlandX(X, mu, sig):
+    dim = len(mu)
+    if dim == 1:
+        g = np.maximum(-2 * X[0,:]/(sig[0] * np.abs(X[0,:])) 
+            * (1 - np.abs(X[0,:] - mu[0])) / sig[0], 0)
+        g = g / g.sum()
+        return g
+    elif dim == 2:
+        g = (-2 * (X[0,:,:] - mu[0]) / (sig[0] * np.abs(X[0,:,:] - mu[0]) + 1e-8)  
+            * np.maximum((1 - np.abs(X[0,:,:] - mu[0])) / sig[0], 0)
+            * np.power(np.maximum(1 - np.abs(X[1,:,:] - mu[1]) / sig[1], 0), 2))
+        g = g / g.max()
+        # g = g / g.sum()  
+        g = g / abs(g).sum()
+        return g
+    elif dim == 3:
+        g = (-2 * (X[0,:,:] - mu[0]) / (sig[0] * np.abs(X[0,:,:] - mu[0]) + 1e-8)  
+            * np.maximum((1 - np.abs(X[0,:,:] - mu[0])) / sig[0], 0)
+            * np.power(np.maximum(1 - np.abs(X[1,:,:] - mu[1]) / sig[1], 0), 2)
+            * np.power(np.maximum(1 - np.abs(X[2,:,:] - mu[2]) / sig[2], 0), 2))
+        # g = g / g.sum()  
+        g = g / abs(g).sum()
+        return g
+    else:
+        raise ValueError('Can only compute Wendland in dimensions 1-2')
+
+def compute_normalized_wendlandY(X, mu, sig):
+    dim = len(mu)
+    if dim == 1:
+        g = np.maximum(-2 * X[0,:]/(sig[0] * np.abs(X[0,:])) 
+            * (1 - np.abs(X[0,:] - mu[0])) / sig[0], 0)
+        g = g / g.sum()
+        return g
+    elif dim == 2:        
+        g = (-2 * (X[1,:,:] - mu[1]) / (sig[1] * np.abs(X[1,:,:] - mu[1]) + 1e-8) 
+            * np.maximum((1 - np.abs(X[1,:,:] - mu[1])) / sig[1], 0)
+            * np.power(np.maximum(1 - np.abs(X[0,:,:] - mu[0]) / sig[0], 0), 2))
+        g = g / g.max()
+        # g = g / g.sum()
+        g = g / abs(g).sum()        
+        return g
+    elif dim == 3:        
+        g = (-2 * (X[1,:,:] - mu[1]) / (sig[1] * np.abs(X[1,:,:] - mu[1]) + 1e-8) 
+            * np.maximum((1 - np.abs(X[1,:,:] - mu[1])) / sig[1], 0)
+            * np.power(np.maximum(1 - np.abs(X[0,:,:] - mu[0]) / sig[0], 0), 2)
+            * np.power(np.maximum(1 - np.abs(X[2,:,:] - mu[2]) / sig[2], 0), 2))
+        # g = g / g.sum()
+        g = g / abs(g).sum()        
+        return g
+    else:
+        raise ValueError('Can only compute Wendland in dimensions 1-2')
+
+def compute_normalized_wendlandZ(X, mu, sig):
+    dim = len(mu)
+    if dim == 1:
+        g = np.maximum(-2 * X[0,:]/(sig[0] * np.abs(X[0,:])) 
+            * (1 - np.abs(X[0,:] - mu[0])) / sig[0], 0)
+        g = g / g.sum()
+        return g
+    elif dim == 2:        
+        g = (-2 * (X[1,:,:] - mu[1]) / (sig[1] * np.abs(X[1,:,:] - mu[1]) + 1e-8) 
+            * np.maximum((1 - np.abs(X[1,:,:] - mu[1])) / sig[1], 0)
+            * np.power(np.maximum(1 - np.abs(X[0,:,:] - mu[0]) / sig[0], 0), 2))
+        g = g / g.max()
+        # g = g / g.sum()
+        g = g / abs(g).sum()        
+        return g
+    elif dim == 3:        
+        g = (-2 * (X[2,:,:] - mu[1]) / (sig[2] * np.abs(X[2,:,:] - mu[2]) + 1e-8) 
+            * np.maximum((1 - np.abs(X[2,:,:] - mu[2])) / sig[2], 0)
+            * np.power(np.maximum(1 - np.abs(X[0,:,:] - mu[0]) / sig[0], 0), 2)
+            * np.power(np.maximum(1 - np.abs(X[1,:,:] - mu[1]) / sig[1], 0), 2))
+        # g = g / g.sum()
+        g = g / abs(g).sum()        
+        return g
+    else:
+        raise ValueError('Can only compute Wendland in dimensions 1-2')    
 
 def _compute_warped_image_multiNC_1d(I0, phi, spacing, spline_order, zero_boundary=False, use_01_input=True):
 
@@ -744,7 +841,117 @@ def centered_identity_map(sz, spacing, dtype='float32'):
             id[d] -= spacing[d]*(sz[d]//2)
         else:
             #odd
-            id[d] -= spacing[d]*((sz[d]+1)//2)
+            id[d] -= spacing[d]*((sz[d]-1)//2)
+            # id[d, (sz[d]-1)//2, :] = id[d, (sz[d]-1)//2-1, :]
+
+
+    # and now store it in a dim+1 array
+    if dim == 1:
+        idnp = np.zeros([1, sz[0]], dtype=dtype)
+        idnp[0, :] = id[0]
+    elif dim == 2:
+        idnp = np.zeros([2, sz[0], sz[1]], dtype=dtype)
+        idnp[0, :, :] = id[0]
+        idnp[1, :, :] = id[1]
+    elif dim == 3:
+        idnp = np.zeros([3, sz[0], sz[1], sz[2]], dtype=dtype)
+        idnp[0, :, :, :] = id[0]
+        idnp[1, :, :, :] = id[1]
+        idnp[2, :, :, :] = id[2]
+    else:
+        raise ValueError('Only dimensions 1-3 are currently supported for the centered identity map')
+
+    return idnp
+
+
+def centered_identity_map_change_middleX(sz, spacing, dtype='float32'):
+    """
+    Returns a centered identity map (with 0 in the middle) if the sz is odd
+    Otherwise shifts everything by 0.5*spacing
+
+    :param sz: just the spatial dimensions, i.e., XxYxZ
+    :param spacing: list with spacing information [sx,sy,sz]
+    :param dtype: numpy data-type ('float32', 'float64', ...)
+    :return: returns the identity map of dimension dimxXxYxZ
+    """
+    dim = len(sz)
+    if dim == 1:
+        id = np.mgrid[0:sz[0]]
+    elif dim == 2:
+        id = np.mgrid[0:sz[0], 0:sz[1]]
+    elif dim == 3:
+        id = np.mgrid[0:sz[0], 0:sz[1], 0:sz[2]]
+    else:
+        raise ValueError('Only dimensions 1-3 are currently supported for the identity map')
+
+    # now get it into range [0,(sz-1)*spacing]^d
+    id = np.array(id.astype(dtype))
+    if dim == 1:
+        id = id.reshape(1, sz[0])  # add a dummy first index
+
+    for d in range(dim):
+        id[d] *= spacing[d]
+        if sz[d]%2==0:
+            #even
+            id[d] -= spacing[d]*(sz[d]//2)
+        else:
+            #odd
+            id[d] -= spacing[d]*((sz[d]-1)//2)
+            id[d, (sz[d]-1)//2, :] = id[d, (sz[d]-1)//2-1, :]
+
+
+    # and now store it in a dim+1 array
+    if dim == 1:
+        idnp = np.zeros([1, sz[0]], dtype=dtype)
+        idnp[0, :] = id[0]
+    elif dim == 2:
+        idnp = np.zeros([2, sz[0], sz[1]], dtype=dtype)
+        idnp[0, :, :] = id[0]
+        idnp[1, :, :] = id[1]
+    elif dim == 3:
+        idnp = np.zeros([3, sz[0], sz[1], sz[2]], dtype=dtype)
+        idnp[0, :, :, :] = id[0]
+        idnp[1, :, :, :] = id[1]
+        idnp[2, :, :, :] = id[2]
+    else:
+        raise ValueError('Only dimensions 1-3 are currently supported for the centered identity map')
+
+    return idnp
+
+def centered_identity_map_change_middleY(sz, spacing, dtype='float32'):
+    """
+    Returns a centered identity map (with 0 in the middle) if the sz is odd
+    Otherwise shifts everything by 0.5*spacing
+
+    :param sz: just the spatial dimensions, i.e., XxYxZ
+    :param spacing: list with spacing information [sx,sy,sz]
+    :param dtype: numpy data-type ('float32', 'float64', ...)
+    :return: returns the identity map of dimension dimxXxYxZ
+    """
+    dim = len(sz)
+    if dim == 1:
+        id = np.mgrid[0:sz[0]]
+    elif dim == 2:
+        id = np.mgrid[0:sz[0], 0:sz[1]]
+    elif dim == 3:
+        id = np.mgrid[0:sz[0], 0:sz[1], 0:sz[2]]
+    else:
+        raise ValueError('Only dimensions 1-3 are currently supported for the identity map')
+
+    # now get it into range [0,(sz-1)*spacing]^d
+    id = np.array(id.astype(dtype))
+    if dim == 1:
+        id = id.reshape(1, sz[0])  # add a dummy first index
+
+    for d in range(dim):
+        id[d] *= spacing[d]
+        if sz[d]%2==0:
+            #even
+            id[d] -= spacing[d]*(sz[d]//2)
+        else:
+            #odd
+            id[d] -= spacing[d]*((sz[d]-1)//2)
+            id[d, :, (sz[d]-1)//2] = id[d, :, (sz[d]-1)//2-1]
 
 
     # and now store it in a dim+1 array

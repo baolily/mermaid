@@ -444,7 +444,7 @@ class LNCCSimilarity(SimilarityMeasure):
         self.dim = len(spacing)
         self.resol_bound = params['similarity_measure']['lncc'][('resol_bound',[128,64], "resolution bound for using different strategy")]
         self.kernel_size_ratio = params['similarity_measure']['lncc'][('kernel_size_ratio',[[1./16,1./8,1./4],[1./4,1./2],[1./2]], "kernel size, ratio of input size")]
-        self.kernel_weight_ratio = params['similarity_measure']['lncc'][('kernel_weight_ratio',[[0.1, 0.3, 0.6],[0.3,0.7],[1.]], "kernel size, ratio of input size")]
+        self.kernel_weight_ratio = params['similarity_measure']['lncc'][('kernel_weight_ratio',[[0.2, 0.2, 0.6],[0.5,0.5],[1.]], "kernel size, ratio of input size")]
         self.strides = params['similarity_measure']['lncc'][('stride',[[1./4,1./4,1./4],[1./4,1./4],[1./4]], "step size, responded with ratio of kernel size")]
         self.dilations = params['similarity_measure']['lncc'][('dilation',[[2,2,2],[2,2],[1]], "dilation param, responded with ratio of kernel size")]
         if self.resol_bound[0] >-1:
@@ -566,7 +566,7 @@ class SingleGaussianLNCCSimilarity(SimilarityMeasure):
         #lncc = ((sm_inputtarget - sm_input*sm_target)**2)/((sm_inputsq-sm_input**2)*(sm_targetsq-sm_target**2))
         lncc = torch.exp(torch.log((sm_inputtarget - sm_input*sm_target).clamp(min=1e-3)) - 0.5*torch.log((sm_inputsq-sm_input**2).clamp(min=1e-3))-0.5*torch.log((sm_targetsq-sm_target**2).clamp(min=1e-3)))
         lncc = 1- lncc.mean()
-        return lncc
+        return lncc/ (self.sigma ** 2)
 
 class MultiGaussianLNCCSimilarity(SimilarityMeasure):
     def __init__(self, spacing, params):
@@ -599,7 +599,7 @@ class SimilarityMeasureFactory(object):
         """image spacing"""
         self.dim = len( spacing )
         """dimension of image"""
-        self.similarity_measure_default_type = 'ssd'
+        self.similarity_measure_default_type = 'lncc'
         """default image similarity measure"""
 
         self.simMeasures = {

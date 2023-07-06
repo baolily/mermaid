@@ -254,9 +254,9 @@ def _show_current_images_2d_map(iS, iT, iW,iSL,iTL, iWL, iter, vizImage, vizName
         plt.subplot(sp_p).set_axis_off()
         plt.imshow(utils.t2np(iW), cmap='gray')
 
-        plt.contour(utils.t2np(phiWarped[0, :, :]), np.linspace(-1, 1, 20), colors='r', linestyles='solid',
+        plt.contour(utils.t2np(phiWarped[0, :, :]), np.linspace(-1, 1, 64), colors='r', linestyles='solid',
                     linewidths=0.5)
-        plt.contour(utils.t2np(phiWarped[1, :, :]), np.linspace(-1, 1, 20), colors='r', linestyles='solid',
+        plt.contour(utils.t2np(phiWarped[1, :, :]), np.linspace(-1, 1, 64), colors='r', linestyles='solid',
                     linewidths=0.5)
         if use_color_bar:
             plt.colorbar().ax.tick_params(labelsize=3)

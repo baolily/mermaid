@@ -598,6 +598,94 @@ class EPDiffMap(ForwardModel):
         return ret_val
 
 
+#  TODO
+# multiple v, m, smoother
+# v = v_1 + v_2 + ... + v_r
+class EPDiffMapMultiK(ForwardModel):
+    """
+    Forward model for the EPDiff equation. State is the momentum, m, and the transform, :math:`\\phi` 
+    (mapping the source image to the target image).
+
+    :math:`(m_1,...,m_d)^T_t = -(div(m_1v),...,div(m_dv))^T-(Dv)^Tm`
+    
+    :math:`v=Km`
+    
+    :math:`\\phi_t+D\\phi v=0`
+    """
+
+    def __init__(self, sz, spacing, smoothers, params=None,compute_inverse_map=False):
+        super(EPDiffMapMultiK, self).__init__(sz,spacing,params)
+        self.compute_inverse_map = compute_inverse_map
+        """If True then computes the inverse map on the fly for a map-based solution"""
+
+        self.smoothers = smoothers
+        self.use_net = True if self.params['smoother']['type'] == 'adaptiveNet' else False
+
+    def debugging(self,input,t):
+        x = utils.checkNan(input)
+        if np.sum(x):
+            print("find nan at {} step".format(t))
+            print("flag m: {}, ".format(x[0]))
+            print("flag v: {},".format(x[1]))
+            print("flag phi: {},".format(x[2]))
+            print("flag new_m: {},".format(x[3]))
+            print("flag new_phi: {},".format(x[4]))
+            raise ValueError("nan error")
+
+    def f(self,t, x, u, pars=None, variables_from_optimizer=None):
+        """
+        Function to be integrated, i.e., right hand side of the EPDiff equation:
+        :math:`-(div(m_1v),...,div(m_dv))^T-(Dv)^Tm'
+        
+        :math:`-D\\phi v`
+        
+        :param t: time (ignored; not time-dependent) 
+        :param x: state, here the image, vector momentum, m, and the map, :math:`\\phi`
+        :param u: ignored, no external input
+        :param pars: ignored (does not expect any additional inputs)
+        :param variables_from_optimizer: variables that can be passed from the optimizer
+        :return: right hand side [m,phi]
+        """
+
+        # assume x[:-1] is m and x[-1] is phi for the state
+        # m = x[:-1]
+        ms = [m.clamp(max=1., min=-1.) for m in x[:-1]]
+        phi = x[-1]
+        n_k = len(self.smoothers)
+        # ms[0] = torch.zeros_like(phi)
+        # ms[2] = torch.zeros_like(phi)
+        # ms[1] = torch.zeros_like(phi)
+        # # ms[1][0, 1, int(ms[2].shape[3]/2)-1:int(ms[2].shape[3]/2)+1, :] = -0.007
+        # ms[1][0, 1, int(ms[2].shape[3]/2), :] = -0.007
+
+        if self.compute_inverse_map:
+            phi_inv = x[2]
+
+        if not self.use_net:
+            vs = [self.smoothers[i].smooth(ms[i],None,utils.combine_dict(pars,{'phi':phi}),variables_from_optimizer) for i in range(n_k)]
+        else:
+            raise NotImplementedError('TODO')
+            v = self.smoother.adaptive_smooth(m, phi, using_map=True)
+
+        # print('max(|v|) = ' + str( v.abs().max() ))
+
+        # v = v_1 + v_2 + ... + v_r
+        v = torch.sum(torch.stack(vs), dim=0)
+        
+        if self.compute_inverse_map:
+            raise NotImplementedError('TODO')
+            ret_val= [self.rhs.rhs_epdiff_multiNC(m,v),
+                      self.rhs.rhs_advect_map_multiNC(phi,v),
+                      self.rhs.rhs_lagrangian_evolve_map_multiNC(phi_inv,v)]
+        else:
+            new_ms = [self.rhs.rhs_epdiff_multiNC(ms[i],v) for i in range(n_k)]
+            # new_m_i = self.rhs.rhs_epdiff_multiNC(m_i,v)
+            new_phi = self.rhs.rhs_advect_map_multiNC(phi,v)
+            ret_val = new_ms + [new_phi]
+            # ret_val= [new_m_i, new_m_i, new_m_i, new_phi]
+        return ret_val
+
+
 
 class EPDiffAdaptMap(ForwardModel):
     """

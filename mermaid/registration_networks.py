@@ -357,7 +357,7 @@ class RegistrationNetDisplacement(RegistrationNet):
         which directly estimate a deformation field.
         """
 
-    def __init__(self, sz, spacing, params):
+    def __init__(self, sz, spacing, params, compute_inverse_map=False):
         """
         Constructor
 
@@ -365,6 +365,7 @@ class RegistrationNetDisplacement(RegistrationNet):
         :param spacing: spatial spacing, e.g., [0.1,0.1,0.2]
         :param params: ParameterDict() object to hold general parameters
         """
+        self.compute_inverse_map = compute_inverse_map
         super(RegistrationNetDisplacement, self).__init__(sz, spacing, params)
 
         self.d = self.create_registration_parameters()
@@ -930,7 +931,7 @@ class RegistrationMapLoss(RegistrationLoss):
                 dispMax = (torch.sqrt(((phi1 - phi0) ** 2).sum(1))).max()
                 print('Max disp = ' + str(utils.t2np(dispMax)))
 
-        energy = sim + reg
+        energy = 1*sim + 2*reg
         return energy, sim, reg
 
     def forward(self, phi0, phi1, I0_source, I1_target, lowres_I0, variables_from_forward_model=None,
@@ -1416,6 +1417,141 @@ class ShootingVectorMomentumNet(RegistrationNetTimeIntegration):
 
         return dstate, downsampled_spacing
 
+class ShootingVectorMomentumMultiKNet(RegistrationNetTimeIntegration):
+    """
+    Methods using vector-momentum-based shooting
+    """
+
+    def __init__(self, sz, spacing, params, n_k=3):
+        super(ShootingVectorMomentumMultiKNet, self).__init__(sz, spacing, params)
+        self.get_momentum_from_external_network = self.env[('get_momentum_from_external_network', False,
+                                                            "use external network to predict momentum, notice that the momentum network is not built in this package")]
+        self.ms = nn.ParameterList([self.create_registration_parameters() for i in range(n_k)])
+        cparams = params[('forward_model', {}, 'settings for the forward model')]
+
+        """smoother"""
+        # mn: added this check
+        # self.smoothers = [SF.SmootherFactory(self.sz[2::], self.spacing).create_smoother(cparams) for i in range(n_k)]    # multiGaussian x3       
+        self.dim = len(spacing)
+        if self.dim==2:
+            self.smoothers = [ # WendlandSpatialSmoother x3
+            SF.SmootherFactory(self.sz[2::], self.spacing).create_smoother_by_name('wendland'), 
+            SF.SmootherFactory(self.sz[2::], self.spacing).create_smoother_by_name('wendland_x'), 
+            SF.SmootherFactory(self.sz[2::], self.spacing).create_smoother_by_name('wendland_y'),
+        ]
+        elif self.dim==3:
+            self.smoothers = [ # WendlandSpatialSmoother x3
+            SF.SmootherFactory(self.sz[2::], self.spacing).create_smoother_by_name('wendland'), 
+            SF.SmootherFactory(self.sz[2::], self.spacing).create_smoother_by_name('wendland_x'), 
+            SF.SmootherFactory(self.sz[2::], self.spacing).create_smoother_by_name('wendland_y'),
+            SF.SmootherFactory(self.sz[2::], self.spacing).create_smoother_by_name('wendland_z'),
+        ]
+        else:
+            raise ValueError('Can only create the smoothing kernel in dimensions 1-3')        
+        # self.smoothers = [SF.SmootherFactory(self.sz[2::], self.spacing).create_smoother_by_name('gaussianSpatial') for i in range(n_k)]  # gaussianSpatial x3
+        for smoother in self.smoothers:
+            print("the param of smoother is {}".format(smoother))
+        if not self.get_momentum_from_external_network:
+            for smoother in self.smoothers:
+                self._shared_states = self._shared_states.union(smoother.associate_parameters_with_module(self))
+        """registers the smoother parameters so gbgithat they are optimized over if applicable"""
+
+        self.integrator = None
+        """integrator to solve EPDiff variant"""
+
+        self.spline_order = params[
+            ('spline_order', 1, 'Spline interpolation order; 1 is linear interpolation (default); 3 is cubic spline')]
+        """order of the spline for interpolations"""
+        self.initial_velocity = None
+        """ the velocity field at t0, saved during map computation and used during loss computation"""
+        self.sparams = params[('shooting_vector_momentum', {}, 'settings for shooting vector momentum methods')]
+        """ settings for the vector momentum related methods"""
+
+        self.use_velocity_mask = self.sparams[('use_velocity_mask_on_boundary', False,
+                                               'a mask to force boundary velocity be zero, the value of the mask is from 0-1')]
+        self.velocity_mask = None
+        """ a continuous image-size float tensor mask, to force zero velocity at the boundary"""
+        if self.use_velocity_mask:
+            img_sz = sz[2:]
+            min_sz = min(img_sz)
+            mask_range = 4 if min_sz > 20 else 3  # control the width of the zero region at the boundary
+            self.velocity_mask = utils.momentum_boundary_weight_mask(sz[2:], spacing, mask_range=mask_range,
+                                                                     smoother_std=0.04, pow=2)
+
+    def associate_parameters_with_module(self):
+        for smoother in self.smoothers:
+            self._shared_states = self._shared_states.union(smoother.associate_parameters_with_module(self))
+
+    def write_parameters_to_settings(self):
+        raise NotImplementedError('TODO')
+        super(ShootingVectorMomentumMultiKNet, self).write_parameters_to_settings()
+        self.smoother.write_parameters_to_settings()
+
+    def get_custom_optimizer_output_string(self):
+        return self.smoothers[0].get_custom_optimizer_output_string()
+
+    def get_custom_optimizer_output_values(self):
+        return self.smoothers[0].get_custom_optimizer_output_values()
+
+    def get_variables_to_transfer_to_loss_function(self):
+        d = dict()
+        for i in range(len(self.smoothers)):
+            d[f'smoother_{i}'] = self.smoothers[i]
+        d['initial_velocity'] = self.initial_velocity
+        return d
+
+    def create_registration_parameters(self):
+        """
+        Creates the vector momentum parameter
+
+        :return: Returns the vector momentum parameter
+        """
+        return utils.create_ND_vector_field_parameter_multiN(self.sz[2::], self.nrOfImages,
+                                                             self.get_momentum_from_external_network)
+
+    def get_parameter_image_and_name_to_visualize(self, ISource=None):
+        """
+        Creates a magnitude image for the momentum and returns it with name :math:`|m|`
+
+        :return: Returns tuple (m_magnitude_image,name)
+        """
+        # raise NotImplementedError('TODO')
+        name = '|m|'
+        par_image = ((self.ms[0][:, ...] ** 2).sum(1)) ** 0.5  # assume BxCxXxYxZ format
+        return par_image, name
+
+    def upsample_registration_parameters(self, desiredSz):
+        """
+        Upsamples the vector-momentum parameter
+
+        :param desiredSz: desired size of the upsampled momentum
+        :return: Returns tuple (upsampled_state,upsampled_spacing)
+        """
+
+        raise NotImplementedError('TODO')
+        ustate = self.state_dict().copy()
+        sampler = IS.ResampleImage()
+        upsampled_m, upsampled_spacing = sampler.upsample_image_to_size(self.m, self.spacing, desiredSz,
+                                                                        self.spline_order)
+        ustate['m'] = upsampled_m.data
+
+        return ustate, upsampled_spacing
+
+    def downsample_registration_parameters(self, desiredSz):
+        """
+        Downsamples the vector-momentum parameter
+
+        :param desiredSz: desired size of the downsampled momentum
+        :return: Returns tuple (downsampled_state,downsampled_spacing)
+        """
+
+        raise NotImplementedError('TODO')
+        dstate = self.state_dict().copy()
+        sampler = IS.ResampleImage()
+        dstate['m'], downsampled_spacing = sampler.downsample_image_to_size(self.m, self.spacing, desiredSz,
+                                                                            self.spline_order)
+
+        return dstate, downsampled_spacing
 
 class LDDMMShootingVectorMomentumImageNet(ShootingVectorMomentumNet):
     """
@@ -1632,6 +1768,151 @@ class LDDMMShootingVectorMomentumMapLoss(RegistrationMapLoss):
               variables_from_forward_model['smoother'].get_penalty()
         return reg
 
+# TODO
+# multiple self.smoother
+class LDDMMShootingVectorMomentumMapMultiKNet(ShootingVectorMomentumMultiKNet):
+    """
+    Specialization for map-based vector-momentum where the map itself is advected
+    """
+
+    def __init__(self, sz, spacing, params, compute_inverse_map=False):
+        self.compute_inverse_map = compute_inverse_map
+        """If set to True the inverse map is computed on the fly"""
+        super(LDDMMShootingVectorMomentumMapMultiKNet, self).__init__(sz, spacing, params)
+        self.integrator = self.create_integrator()
+        """integrator to solve EPDiff variant"""
+
+    def create_integrator(self):
+        """
+        Creates an integrator for EPDiff + advection equation for the map
+
+        :return: returns this integrator
+        """
+        cparams = self.params[('forward_model', {}, 'settings for the forward model')]
+        epdiffMap = FM.EPDiffMapMultiK(self.sz, self.spacing, self.smoothers, cparams,compute_inverse_map=self.compute_inverse_map)
+        return ODE.ODEWrapBlock(epdiffMap, cparams, self.use_odeint, self.use_ode_tuple, self.tFrom, self.tTo)
+
+    def forward(self, phi, I0_source, phi_inv=None, variables_from_optimizer=None):
+        """
+        Solves EPDiff + advection equation forward and returns the map at time tTo
+
+        :param phi: initial condition for the map
+        :param I0_source: not used
+        :param phi_inv: inverse initial map
+        :param variables_from_optimizer: allows passing variables (as a dict from the optimizer; e.g., the current iteration)
+        :return: returns the map at time tTo
+        """
+        for smoother in self.smoothers:
+            smoother.set_source_image(I0_source)
+        ms = self.ms
+        pars_to_pass_i = self._get_default_dictionary_to_pass_to_integrator()
+        # if self.use_velocity_mask:
+        #     m= self.m
+        #     if self.get_momentum_from_external_network:
+        #         m = self.m * self.velocity_mask
+        #     else:
+        #         self.m.data = self.m.clamp(min=-2, max=2)
+        #         m = self.m * self.velocity_mask
+        # todo current code is not efficient, need to compute the init v and pass it to reg_loss
+        self.integrator.init_solver(pars_to_pass_i, variables_from_optimizer, has_combined_input=True)
+        if self.compute_inverse_map:
+            if phi_inv is not None:
+                mphi1 = self.integrator.solve(list(ms) + [phi, phi_inv], variables_from_optimizer)
+                return (mphi1[-2], mphi1[-1])
+            else:
+                mphi1 = self.integrator.solve(list(ms) + [phi], variables_from_optimizer)
+                return (mphi1[-1], None)
+        else:
+            mphi1 = self.integrator.solve(list(ms) + [phi], variables_from_optimizer)
+            return mphi1[-1]
+
+# TODO
+class LDDMMShootingVectorMomentumMapMultiKLoss(RegistrationMapLoss):
+    """
+    Specialization of the loss for map-based vector momumentum. Image similarity is computed based on warping the source
+    image with the advected map.
+    """
+
+    def __init__(self, ms, sz_sim, spacing_sim, sz_model, spacing_model, params):
+        super(LDDMMShootingVectorMomentumMapMultiKLoss, self).__init__(sz_sim, spacing_sim, sz_model, spacing_model, params)
+        self.ms = ms    # ms.size() = torch.Size([1, 2, 16, 16]) # This is perhaps wrong
+        """vector momentum"""
+
+    def compute_regularization_energy(self, I0_source, variables_from_forward_model, variables_from_optimizer=None):
+        """
+        Commputes the regularization energy from the initial vector momentum
+
+        :param I0_source: not used
+        :param variables_from_forward_model: allows passing in additional variables (intended to pass variables between the forward modell and the loss function)
+        :param variables_from_optimizer: allows passing variables (as a dict from the optimizer; e.g., the current iteration)
+        :return: returns the regularization energy
+        """
+        ms = torch.stack(self.ms)
+        pars_to_pass = utils.combine_dict({'I': I0_source}, self._get_default_dictionary_to_pass_to_smoother())
+        reg_factor = 1.0
+        sparse_factor = 1
+        kernel_factors = [1, 1., 1.]
+        kernel_factors = torch.as_tensor(kernel_factors, device=ms.device)
+        kernel_factor = 0.01
+        kernel_factor = torch.as_tensor(kernel_factor, device=ms.device)
+        reg = 0
+        for i in range(len(ms)):
+            m = ms[i]
+            v = variables_from_forward_model[f'smoother_{i}'].smooth(m, None, pars_to_pass, variables_from_optimizer,
+                                                                smooth_to_compute_regularizer_energy=True)
+            if i == 0:
+                v1 = v
+            elif i == 1:
+                v1 = v
+                v1x = torch.gradient(v[0, 0, :, :], dim = 0)
+                v2x = torch.gradient(v[0, 1, :, :], dim = 0)
+                v1[0, 0, :, :] = v1x[0]
+                v1[0, 1, :, :] = v2x[0]
+            elif i == 2:
+                v1 = v
+                v1y = torch.gradient(v[0, 0, :, :], dim = 1)
+                v2y = torch.gradient(v[0, 1, :, :], dim = 1)
+                v1[0, 0, :, :] = v1y[0]
+                v1[0, 1, :, :] = v2y[0]
+            reg = reg + torch.clamp((v1 * m), min=0.).sum() * self.spacing_model.prod() * self.reg_factor + \
+                variables_from_forward_model[f'smoother_{i}'].get_penalty()
+        # reg = (reg + self.compute_sparse_penalty(kernel_factors) * sparse_factor) / (1 + sparse_factor)
+        reg1 = reg * reg_factor + self.compute_sparse_penalty(kernel_factors) *self.spacing_model.prod() * sparse_factor 
+        return reg1
+
+    def compute_sparse_penalty(self, kernel_factors):
+        # kernel_factors = kernel_factors / torch.sum(kernel_factors)
+        ms = torch.stack(self.ms)
+        ms_norm = torch.norm(ms, dim=2) # L_1 norm
+        # ms_norm_maxsup = torch.where(ms_norm == ms_norm.max(dim=0)[0], 0, ms_norm)
+        penalty = torch.dot(ms_norm.sum(dim=[1, 2, 3]), kernel_factors)
+        return penalty
+
+    def compute_sparse_penalty1(self, kernel_factor):
+        # kernel_factors = kernel_factors / torch.sum(kernel_factors)
+        ms = torch.stack(self.ms)
+        ms_norm = torch.norm(ms, dim=2) # L_1 norm
+        m_norm =torch.norm(ms_norm, dim =0)
+        penalty = m_norm.sum() * kernel_factor
+        return penalty
+
+    def compute_sparse_penalty2(self, kernel_factor):
+        # kernel_factors = kernel_factors / torch.sum(kernel_factors)
+        ms = torch.stack(self.ms)
+        ms_norm = torch.norm(ms, dim=2) # L_1 norm
+        m_norm =torch.norm(ms_norm, p=1, dim =0)
+        penalty = m_norm.sum() * kernel_factor
+        return penalty
+
+    def compute_sparse_penalty3(self, kernel_factors):
+        # kernel_factors = kernel_factors / torch.sum(kernel_factors)
+        ms = torch.stack(self.ms)
+        ms_norm = torch.norm(ms, dim=2) # L_1 norm
+        for i in range(len(ms)):
+            ms_norm[i,0,:,:] = kernel_factors[i] * ms_norm[i,0,:,:]
+        m_norm =torch.norm(ms_norm, p=1, dim =0)
+        penalty = m_norm.sum()
+        return penalty
 
 class SVFVectorMomentumMapNet(ShootingVectorMomentumNet):
     """
